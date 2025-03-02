@@ -49,30 +49,14 @@ static inline json_token_t json_number_token(const char** json) {
     }
 }
 
-static inline json_token_t json_keyword_token(const char** json) {
-    json_token_t token = {JSON_TOKEN_ERROR, *json, *json + 1};
-    switch (**json) {
-        case 't':
-            if (strncmp(*json, "true", 4) == 0) {
-                token.type = JSON_TOKEN_TRUE;
-                token.end = *json += 4;
-            }
-            break;
-
-        case 'f':
-            if (strncmp(*json, "false", 5) == 0) {
-                token.type = JSON_TOKEN_FALSE;
-                token.end = *json += 5;
-            }
-            break;
-
-        case 'n':
-            if (strncmp(*json, "null", 4) == 0) {
-                token.type = JSON_TOKEN_NULL;
-                token.end = *json += 4;
-            }
-            break;
+static inline json_token_t json_keyword_token(const char** json, const char* keyword, json_token_type_e type) {
+    json_token_t token = {type, *json, *json};
+    while (*token.end && *keyword && *++token.end == *++keyword);
+    if (*keyword == '\0') {
+        *json = token.end;
+        return token;
     }
+    token.type = JSON_TOKEN_ERROR;
     return token;
 }
 
@@ -108,9 +92,13 @@ json_token_t json_next_token(const char** json) {
             return json_number_token(json);
 
         case 't':
+            return json_keyword_token(json, "true", JSON_TOKEN_TRUE);
+
         case 'f':
+            return json_keyword_token(json, "false", JSON_TOKEN_FALSE);
+
         case 'n':
-            return json_keyword_token(json);
+            return json_keyword_token(json, "null", JSON_TOKEN_NULL);
     }
     return (json_token_t){JSON_TOKEN_ERROR, *json, *json};
 }
