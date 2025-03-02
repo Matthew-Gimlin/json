@@ -1,5 +1,21 @@
 #include "json.h"
 
+static inline void json_skip_whitespace(const char** json) {
+    while (**json) {
+        switch (**json) {
+            case ' ':
+            case '\t':
+            case '\n':
+            case '\r':
+                ++*json;
+                break;
+
+            default:
+                return;
+        }
+    }
+}
+
 static inline json_token_t json_string_token(const char** json) {
     json_token_t string = {JSON_TOKEN_STRING, *json, *json};
     while (*++string.end) {
@@ -33,20 +49,31 @@ static inline json_token_t json_number_token(const char** json) {
     }
 }
 
-static inline void json_skip_whitespace(const char** json) {
-    while (**json) {
-        switch (**json) {
-            case ' ':
-            case '\t':
-            case '\n':
-            case '\r':
-                ++*json;
-                break;
+static inline json_token_t json_keyword_token(const char** json) {
+    json_token_t token = {JSON_TOKEN_ERROR, *json, *json + 1};
+    switch (**json) {
+        case 't':
+            if (strncmp(*json, "true", 4) == 0) {
+                token.type = JSON_TOKEN_TRUE;
+                token.end = *json += 4;
+            }
+            break;
 
-            default:
-                return;
-        }
+        case 'f':
+            if (strncmp(*json, "false", 5) == 0) {
+                token.type = JSON_TOKEN_FALSE;
+                token.end = *json += 5;
+            }
+            break;
+
+        case 'n':
+            if (strncmp(*json, "null", 4) == 0) {
+                token.type = JSON_TOKEN_NULL;
+                token.end = *json += 4;
+            }
+            break;
     }
+    return token;
 }
 
 json_token_t json_next_token(const char** json) {
@@ -80,7 +107,10 @@ json_token_t json_next_token(const char** json) {
         case '0' ... '9':
             return json_number_token(json);
 
-        default:
-            return (json_token_t){JSON_TOKEN_ERROR, *json, *json};
+        case 't':
+        case 'f':
+        case 'n':
+            return json_keyword_token(json);
     }
+    return (json_token_t){JSON_TOKEN_ERROR, *json, *json};
 }

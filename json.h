@@ -1,6 +1,8 @@
 #ifndef JSON_H
 #define JSON_H
 
+#include <string.h>
+
 typedef enum {
     JSON_TOKEN_ERROR = 0,
     JSON_TOKEN_EOF,
