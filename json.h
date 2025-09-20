@@ -1,8 +1,6 @@
 #ifndef JSON_H
 #define JSON_H
 
-#include <string.h>
-
 typedef enum {
     JSON_TOKEN_ERROR = 0,
     JSON_TOKEN_EOF,
@@ -25,6 +23,11 @@ typedef struct {
     const char* end;
 } json_token_t;
 
-json_token_t json_next_token(const char** json);
+typedef struct {
+    const char* start;
+    const char* current;
+} json_lexer_t;
+
+json_token_t json_next_token(json_lexer_t* lexer);
 
 #endif
