@@ -1,128 +1,364 @@
 #include "json.h"
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
 #include <string.h>
 
-static inline void json_eat(json_lexer_t* lexer) {
-    ++lexer->current;
+static JsonArena* jsonNewArena() {
+    JsonArena* arena = malloc(sizeof(*arena));
+    if (!arena) {
+        return NULL;
+    }
+    arena->size = 0;
+    arena->next = NULL;
+    return arena;
 }
 
-static inline json_token_t json_token(
-        json_lexer_t* lexer, json_token_type_e type) {
-    return (json_token_t){
-        .type = type,
-        .start = lexer->start,
-        .end = lexer->current,
-    };
+static void jsonFreeArena(JsonArena* arena) {
+    JsonArena* next;
+    while (arena) {
+        next = arena->next;
+        free(arena);
+        arena = next;
+    }
 }
 
-static inline void json_skip_whitespace(json_lexer_t* lexer) {
-    while (*lexer->current) {
-        switch (*lexer->current) {
-            case ' ':
-            case '\t':
-            case '\n':
-            case '\r':
-                json_eat(lexer);
-                break;
+static inline size_t align(size_t n) {
+    return (n + alignof(max_align_t) - 1) & ~(alignof(max_align_t) - 1);
+}
 
-            default:
-                return;
+static void* jsonAlloc(JsonArena* arena, size_t n) {
+    if (arena == NULL || n == 0 || n >= JSON_ARENA_SIZE) {
+        return NULL;
+    }
+    size_t i = align(arena->size);
+    while (i + n >= JSON_ARENA_SIZE) {
+        if (!arena->next) {
+            if (!(arena->next = jsonNewArena())) {
+                return NULL;
+            }
+        }
+        arena = arena->next;
+        i = align(arena->size);
+    }
+    void* p = &arena->data[i];
+    arena->size = i + n;
+    return p;
+}
+
+void jsonParserInit(JsonParser* parser, const char* text) {
+    parser->text = text;
+    parser->arena = jsonNewArena();
+    parser->begin = text;
+    parser->end = text;
+    parser->token = JSON_TOKEN_ERROR;
+}
+
+void jsonParserFree(JsonParser* parser) {
+    jsonFreeArena(parser->arena);
+    parser->text = NULL;
+    parser->arena = NULL;
+    parser->begin = NULL;
+    parser->end = NULL;
+}
+
+static inline bool jsonIsSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static inline bool jsonIsDigit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+static void jsonSkipSpace(JsonParser* parser) {
+    while (jsonIsSpace(*parser->end)) {
+        parser->end++;
+    }
+}
+
+static bool jsonNumberToken(JsonParser* parser) {
+    if (*parser->end == '-') {
+        parser->end++;
+    }
+    while (jsonIsDigit(*parser->end)) {
+        parser->end++;
+    }
+    if (*parser->end == '.') {
+        parser->end++;
+        while (jsonIsDigit(*parser->end)) {
+            parser->end++;
+        }
+        if (*parser->end == 'e' || *parser->end == 'E') {
+            parser->end++;
+            if (*parser->end == '+' || *parser->end == '-') {
+                parser->end++;
+            }
+            while (jsonIsDigit(*parser->end)) {
+                parser->end++;
+            }
         }
     }
+    parser->token = JSON_TOKEN_NUMBER;
+    return true;
 }
 
-static inline json_token_t json_string_token(json_lexer_t* lexer) {
-    json_eat(lexer);
-    while (*lexer->current) {
-        switch (*lexer->current) {
-            case '"':
-                json_eat(lexer);
-                return json_token(lexer, JSON_TOKEN_STRING);
-
-            default:
-                json_eat(lexer);
-                break;
+static bool jsonStringToken(JsonParser* parser) {
+    bool isEscaped = false;
+    do {
+        parser->end++;
+        if (*parser->end == '"' && !isEscaped) {
+            parser->end++;
+            parser->token = JSON_TOKEN_STRING;
+            return true;
+        } else if (*parser->end == '\\') {
+            isEscaped = !isEscaped;
+        } else {
+            isEscaped = false;
         }
-    }
-    return json_token(lexer, JSON_TOKEN_ERROR);
+    } while (*parser->end);
+    parser->token = JSON_TOKEN_ERROR;
+    return false;
 }
 
-static inline json_token_t json_number_token(json_lexer_t* lexer) {
-    json_eat(lexer);
-    while (*lexer->current) {
-        switch (*lexer->current) {
-            case '-':
-            case '+':
-            case 'e':
-            case 'E':
-            case '.':
-            case '0' ... '9':
-                json_eat(lexer);
-                break;
-            
-            default:
-                return json_token(lexer, JSON_TOKEN_NUMBER);
-        }
+static bool jsonIsKeyword(JsonParser* parser, const char* keyword, size_t n,
+        JsonToken token) {
+    if (strncmp(parser->end, keyword, n) == 0) {
+        parser->end += n;
+        parser->token = token;
+        return true;
     }
-    return json_token(lexer, JSON_TOKEN_NUMBER);
+    parser->token = JSON_TOKEN_ERROR;
+    return false;
 }
 
-static inline json_token_t json_keyword_token(
-        json_lexer_t* lexer, const char* keyword, size_t keyword_len,
-        json_token_type_e type) {
-    json_eat(lexer);
-    if (strncmp(lexer->current, keyword, keyword_len) != 0) {
-        return json_token(lexer, JSON_TOKEN_ERROR);
-    }
-    lexer->current += keyword_len;
-    return json_token(lexer, type);
-}
-
-json_token_t json_next_token(json_lexer_t* lexer) {
-    json_skip_whitespace(lexer);
-    lexer->start = lexer->current;
-    switch (*lexer->current) {
+static bool jsonNextToken(JsonParser* parser) {
+    jsonSkipSpace(parser);
+    parser->begin = parser->end;
+    switch (*parser->end) {
         case '\0':
-            return json_token(lexer, JSON_TOKEN_EOF);
-            
+            parser->token = JSON_TOKEN_EOF;
+            return true;
         case '{':
-            json_eat(lexer);
-            return json_token(lexer, JSON_TOKEN_LEFT_CURLY);
-
+            parser->end++;
+            parser->token = JSON_TOKEN_LEFT_CURLY;
+            return true;
         case '}':
-            json_eat(lexer);
-            return json_token(lexer, JSON_TOKEN_RIGHT_CURLY);
-
+            parser->end++;
+            parser->token = JSON_TOKEN_RIGHT_CURLY;
+            return true;
         case '[':
-            json_eat(lexer);
-            return json_token(lexer, JSON_TOKEN_LEFT_BRACKET);
-
+            parser->end++;
+            parser->token = JSON_TOKEN_LEFT_BRACKET;
+            return true;
         case ']':
-            json_eat(lexer);
-            return json_token(lexer, JSON_TOKEN_RIGHT_BRACKET);
-
+            parser->end++;
+            parser->token = JSON_TOKEN_RIGHT_BRACKET;
+            return true;
         case ':':
-            json_eat(lexer);
-            return json_token(lexer, JSON_TOKEN_COLON);
-
+            parser->end++;
+            parser->token = JSON_TOKEN_COLON;
+            return true;
         case ',':
-            json_eat(lexer);
-            return json_token(lexer, JSON_TOKEN_COMMA);
-
-        case '"':
-            return json_string_token(lexer);
-
-        case '-':
-        case '0' ... '9':
-            return json_number_token(lexer);
-
-        case 't':
-            return json_keyword_token(lexer, "rue", 3, JSON_TOKEN_TRUE);
-
-        case 'f':
-            return json_keyword_token(lexer, "alse", 4, JSON_TOKEN_FALSE);
-
+            parser->end++;
+            parser->token = JSON_TOKEN_COMMA;
+            return true;
         case 'n':
-            return json_keyword_token(lexer, "ull", 3, JSON_TOKEN_NULL);
+            return jsonIsKeyword(parser, "null", 4, JSON_TOKEN_NULL);
+        case 't':
+            return jsonIsKeyword(parser, "true", 4, JSON_TOKEN_TRUE);
+        case 'f':
+            return jsonIsKeyword(parser, "false", 5, JSON_TOKEN_FALSE);
+        case '"':
+            return jsonStringToken(parser);
+        default:
+            break;
     }
-    return json_token(lexer, JSON_TOKEN_ERROR);
+    if (jsonIsDigit(*parser->end)) {
+        return jsonNumberToken(parser);
+    }
+    parser->token = JSON_TOKEN_ERROR;
+    return false;
+}
+
+static const char* jsonStringDuplicate(JsonParser* parser) {
+    size_t n = parser->end - parser->begin - 2; // ignore the quotes
+    char* s = jsonAlloc(parser->arena, n + 1);
+    memcpy(s, parser->begin + 1, n);
+    s[n] = '\0';
+    return s;
+}
+
+static Json* jsonNewNode(JsonParser* parser, JsonType type) {
+    Json* node = jsonAlloc(parser->arena, sizeof(*node));
+    if (!node) {
+        return NULL;
+    }
+    node->type = type;
+    node->next = NULL;
+    node->key = NULL;
+    return node;
+}
+
+static Json* jsonParseNode(JsonParser* parser);
+
+static Json* jsonParseArray(JsonParser* parser) {
+    Json* head = jsonParseNode(parser);
+    if (!head) {
+        return NULL;
+    }
+    Json* current = head;
+    while (jsonNextToken(parser) && parser->token == JSON_TOKEN_COMMA) {
+        jsonNextToken(parser);
+        if (!(current->next = jsonParseNode(parser))) {
+            return NULL;
+        }
+        current = current->next;
+    }
+    if (parser->token != JSON_TOKEN_RIGHT_BRACKET) {
+        return NULL;
+    }
+    return head;
+}
+
+static uint32_t jsonHash(const char* key, size_t n) {
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < n; i++) {
+        hash ^= (unsigned char)key[i];
+        hash *= 16777619u;
+        key++;
+    }
+    return hash;
+}
+
+static JsonTable* jsonParseObject(JsonParser* parser) {
+    JsonTable* table = jsonAlloc(parser->arena, sizeof(*table));
+    memset(table->buckets, 0, sizeof(*table->buckets));
+    if (!table) {
+        return NULL;
+    }
+    do {
+        jsonNextToken(parser);
+        Json* key = jsonParseNode(parser);
+        if (!key) {
+            return NULL;
+        }
+        uint32_t hash = jsonHash(key->string, strlen(key->string));
+        jsonNextToken(parser);
+        if (parser->token != JSON_TOKEN_COLON) {
+            return NULL;
+        }
+        Json** value = &table->buckets[hash % JSON_TABLE_SIZE];
+        while (*value) {
+            value = &(*value)->next;
+        }
+        jsonNextToken(parser);
+        if (!(*value = jsonParseNode(parser))) {
+            return NULL;
+        }
+        (*value)->key = key->string;
+    } while (jsonNextToken(parser) && parser->token == JSON_TOKEN_COMMA);
+    if (parser->token != JSON_TOKEN_RIGHT_CURLY) {
+        return NULL;
+    }
+    return table;
+}
+
+static Json* jsonParseNode(JsonParser* parser) {
+    Json* node = NULL;
+    switch (parser->token) {
+        case JSON_TOKEN_NULL:
+            return jsonNewNode(parser, JSON_NULL);
+        case JSON_TOKEN_TRUE:
+        case JSON_TOKEN_FALSE:
+            node = jsonNewNode(parser, JSON_BOOLEAN);
+            node->boolean = (parser->token == JSON_TOKEN_TRUE);
+            return node;
+        case JSON_TOKEN_NUMBER:
+            node = jsonNewNode(parser, JSON_NUMBER);
+            node->number = strtod(parser->begin, NULL);
+            return node;
+        case JSON_TOKEN_STRING:
+            node = jsonNewNode(parser, JSON_STRING);
+            node->string = jsonStringDuplicate(parser);
+            return node;
+        case JSON_TOKEN_LEFT_BRACKET:
+            node = jsonNewNode(parser, JSON_ARRAY);
+            if (jsonNextToken(parser)
+                    && parser->token == JSON_TOKEN_RIGHT_BRACKET) {
+                return node;
+            } else if (!(node->array = jsonParseArray(parser))) {
+                return NULL;
+            }
+            return node;
+        case JSON_TOKEN_LEFT_CURLY:
+            node = jsonNewNode(parser, JSON_OBJECT);
+            if (!(node->table = jsonParseObject(parser))) {
+                return NULL;
+            }
+            return node;
+        default:
+            break;
+    }
+    return NULL;
+}
+
+Json* jsonParse(JsonParser* parser) {
+    if (!jsonNextToken(parser)) {
+        return NULL;
+    }
+    return jsonParseNode(parser);
+}
+
+void jsonPrint(Json* json) {
+    if (!json) {
+        return;
+    }
+    switch (json->type) {
+        case JSON_NULL:
+            printf("null");
+            break;
+        case JSON_BOOLEAN:
+            printf("%s", json->boolean ? "true" : "false");
+            break;
+        case JSON_NUMBER:
+            printf("%g", json->number);
+            break;
+        case JSON_STRING:
+            printf("\"%s\"", json->string);
+            break;
+        case JSON_ARRAY: {
+            printf("[");
+            Json* node = json->array;
+            while (node) {
+                jsonPrint(node);
+                if (node->next) {
+                    printf(",");
+                }
+                node = node->next;
+            }
+            printf("]");
+            break;
+        }
+        case JSON_OBJECT: {
+            printf("{");
+            bool comma = false;
+            for (int i = 0; i < JSON_TABLE_SIZE; i++) {
+                Json* head = json->table->buckets[i];
+                while (head) {
+                    if (comma) {
+                        printf(",");
+                    }
+                    printf("\"%s\":", head->key);
+                    jsonPrint(head);
+                    head = head->next;
+                    comma = true;
+                }
+            }
+            printf("}");
+            break;
+        }
+        default:
+            break;
+    }
 }
