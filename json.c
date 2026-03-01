@@ -15,7 +15,7 @@ static JsonArena* jsonNewArena() {
     return arena;
 }
 
-static void jsonFreeArena(JsonArena* arena) {
+static void jsonParserFreeArena(JsonArena* arena) {
     JsonArena* next;
     while (arena) {
         next = arena->next;
@@ -56,7 +56,7 @@ void jsonParserInit(JsonParser* parser, const char* text) {
 }
 
 void jsonParserFree(JsonParser* parser) {
-    jsonFreeArena(parser->arena);
+    jsonParserFreeArena(parser->arena);
     parser->text = NULL;
     parser->arena = NULL;
     parser->begin = NULL;
@@ -89,14 +89,14 @@ static bool jsonNumberToken(JsonParser* parser) {
         while (jsonIsDigit(*parser->end)) {
             parser->end++;
         }
-        if (*parser->end == 'e' || *parser->end == 'E') {
+    }
+    if (*parser->end == 'e' || *parser->end == 'E') {
+        parser->end++;
+        if (*parser->end == '+' || *parser->end == '-') {
             parser->end++;
-            if (*parser->end == '+' || *parser->end == '-') {
-                parser->end++;
-            }
-            while (jsonIsDigit(*parser->end)) {
-                parser->end++;
-            }
+        }
+        while (jsonIsDigit(*parser->end)) {
+            parser->end++;
         }
     }
     parser->token = JSON_TOKEN_NUMBER;
@@ -174,7 +174,7 @@ static bool jsonNextToken(JsonParser* parser) {
         default:
             break;
     }
-    if (jsonIsDigit(*parser->end)) {
+    if (*parser->end == '-' || jsonIsDigit(*parser->end)) {
         return jsonNumberToken(parser);
     }
     parser->token = JSON_TOKEN_ERROR;
@@ -226,38 +226,41 @@ static uint32_t jsonHash(const char* key, size_t n) {
     for (size_t i = 0; i < n; i++) {
         hash ^= (unsigned char)key[i];
         hash *= 16777619u;
-        key++;
     }
     return hash;
 }
 
 static JsonTable* jsonParseObject(JsonParser* parser) {
     JsonTable* table = jsonAlloc(parser->arena, sizeof(*table));
+    if (!table) {
+        return NULL;
+    }
     memset(table->buckets, 0, sizeof(*table->buckets));
     if (!table) {
         return NULL;
     }
     do {
-        jsonNextToken(parser);
-        Json* key = jsonParseNode(parser);
+        if (parser->token != JSON_TOKEN_STRING) {
+            return NULL;
+        }
+        const char* key = jsonStringDuplicate(parser);
         if (!key) {
             return NULL;
         }
-        uint32_t hash = jsonHash(key->string, strlen(key->string));
-        jsonNextToken(parser);
-        if (parser->token != JSON_TOKEN_COLON) {
+        uint32_t hash = jsonHash(key, strlen(key));
+        if (!jsonNextToken(parser) || parser->token != JSON_TOKEN_COLON) {
             return NULL;
         }
         Json** value = &table->buckets[hash % JSON_TABLE_SIZE];
         while (*value) {
             value = &(*value)->next;
         }
-        jsonNextToken(parser);
-        if (!(*value = jsonParseNode(parser))) {
+        if (!jsonNextToken(parser) || !(*value = jsonParseNode(parser))) {
             return NULL;
         }
-        (*value)->key = key->string;
-    } while (jsonNextToken(parser) && parser->token == JSON_TOKEN_COMMA);
+        (*value)->key = key;
+        jsonNextToken(parser);
+    } while (parser->token == JSON_TOKEN_COMMA && jsonNextToken(parser));
     if (parser->token != JSON_TOKEN_RIGHT_CURLY) {
         return NULL;
     }
@@ -293,6 +296,11 @@ static Json* jsonParseNode(JsonParser* parser) {
             return node;
         case JSON_TOKEN_LEFT_CURLY:
             node = jsonNewNode(parser, JSON_OBJECT);
+            if (jsonNextToken(parser)
+                    && parser->token == JSON_TOKEN_RIGHT_CURLY) {
+                node->table = NULL;
+                return node;
+            }
             if (!(node->table = jsonParseObject(parser))) {
                 return NULL;
             }
@@ -342,6 +350,10 @@ void jsonPrint(Json* json) {
         }
         case JSON_OBJECT: {
             printf("{");
+            if (!json->table) {
+                printf("}");
+                break;
+            }
             bool comma = false;
             for (int i = 0; i < JSON_TABLE_SIZE; i++) {
                 Json* head = json->table->buckets[i];

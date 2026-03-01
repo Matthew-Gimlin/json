@@ -25,7 +25,7 @@ struct Json {
     JsonType type;
     union {
         bool boolean;
-        float number;
+        double number;
         const char* string;
         Json* array;
         JsonTable* table;
