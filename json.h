@@ -2,6 +2,8 @@
 #define JSON_H
 
 #include <stddef.h>
+#include <stdbool.h>
+#include <stdalign.h>
 
 typedef enum {
     JSON_UNDEFINED,
@@ -60,18 +62,24 @@ typedef enum {
 } JsonToken;
 
 typedef struct {
-    const char* text;
     JsonArena* arena;
     const char* begin;
     const char* end;
     JsonToken token;
 } JsonParser;
 
-void jsonParserInit(JsonParser* parser, const char* text);
+void jsonParserInit(JsonParser* parser);
 void jsonParserFree(JsonParser* parser);
 
-Json* jsonParse(JsonParser* parser);
+Json* jsonParse(JsonParser* parser, const char* text);
+Json* jsonParseFile(JsonParser* parser, const char* filename);
 
 void jsonPrint(Json* json);
+Json* jsonSelect(Json* root, const char* path);
+
+#define JSON_FOR_EACH(element, jsonArray) for ( \
+    Json* element = (jsonArray)->array; \
+    element && (jsonArray)->type == JSON_ARRAY; \
+    element = element->next)
 
 #endif // JSON_H

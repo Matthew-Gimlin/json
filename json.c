@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
-#include <string.h>
 
 static JsonArena* jsonNewArena() {
     JsonArena* arena = malloc(sizeof(*arena));
@@ -24,40 +23,40 @@ static void jsonParserFreeArena(JsonArena* arena) {
     }
 }
 
-static inline size_t align(size_t n) {
+static inline size_t alignUp(size_t n) {
     return (n + alignof(max_align_t) - 1) & ~(alignof(max_align_t) - 1);
 }
 
 static void* jsonAlloc(JsonArena* arena, size_t n) {
-    if (arena == NULL || n == 0 || n >= JSON_ARENA_SIZE) {
+    if (arena == NULL || n == 0 || n > JSON_ARENA_SIZE) {
         return NULL;
     }
-    size_t i = align(arena->size);
-    while (i + n >= JSON_ARENA_SIZE) {
+    size_t i = alignUp(arena->size);
+    while (i + n > JSON_ARENA_SIZE) {
         if (!arena->next) {
             if (!(arena->next = jsonNewArena())) {
                 return NULL;
             }
         }
         arena = arena->next;
-        i = align(arena->size);
+        i = alignUp(arena->size);
     }
     void* p = &arena->data[i];
     arena->size = i + n;
     return p;
 }
 
-void jsonParserInit(JsonParser* parser, const char* text) {
-    parser->text = text;
-    parser->arena = jsonNewArena();
-    parser->begin = text;
-    parser->end = text;
+void jsonParserInit(JsonParser* parser) {
+    if (!(parser->arena = jsonNewArena())) {
+        return;
+    }
+    parser->begin = NULL;
+    parser->end = NULL;
     parser->token = JSON_TOKEN_ERROR;
 }
 
 void jsonParserFree(JsonParser* parser) {
     jsonParserFreeArena(parser->arena);
-    parser->text = NULL;
     parser->arena = NULL;
     parser->begin = NULL;
     parser->end = NULL;
@@ -235,7 +234,7 @@ static JsonTable* jsonParseObject(JsonParser* parser) {
     if (!table) {
         return NULL;
     }
-    memset(table->buckets, 0, sizeof(*table->buckets));
+    memset(table->buckets, 0, sizeof(table->buckets));
     if (!table) {
         return NULL;
     }
@@ -253,7 +252,7 @@ static JsonTable* jsonParseObject(JsonParser* parser) {
         }
         Json** value = &table->buckets[hash % JSON_TABLE_SIZE];
         while (*value) {
-            value = &(*value)->next;
+            value = &((*value)->next);
         }
         if (!jsonNextToken(parser) || !(*value = jsonParseNode(parser))) {
             return NULL;
@@ -277,10 +276,15 @@ static Json* jsonParseNode(JsonParser* parser) {
             node = jsonNewNode(parser, JSON_BOOLEAN);
             node->boolean = (parser->token == JSON_TOKEN_TRUE);
             return node;
-        case JSON_TOKEN_NUMBER:
+        case JSON_TOKEN_NUMBER: {
             node = jsonNewNode(parser, JSON_NUMBER);
-            node->number = strtod(parser->begin, NULL);
+            char* end;
+            node->number = strtod(parser->begin, &end);
+            if (!end) {
+                return NULL;
+            }
             return node;
+        }
         case JSON_TOKEN_STRING:
             node = jsonNewNode(parser, JSON_STRING);
             node->string = jsonStringDuplicate(parser);
@@ -311,11 +315,42 @@ static Json* jsonParseNode(JsonParser* parser) {
     return NULL;
 }
 
-Json* jsonParse(JsonParser* parser) {
+Json* jsonParse(JsonParser* parser, const char* text) {
+    parser->begin = text;
+    parser->end = text;
     if (!jsonNextToken(parser)) {
         return NULL;
     }
     return jsonParseNode(parser);
+}
+
+Json* jsonParseFile(JsonParser* parser, const char* filename) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) {
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        return NULL;
+    }
+    long n = ftell(f);
+    if (n < 0) {
+        return NULL;
+    }
+    rewind(f);
+    char* text = malloc(n + 1);
+    if (!text) {
+        return NULL;
+    }
+    if (fread(text, sizeof(*text), n, f) != (size_t)n) {
+        fclose(f);
+        free(text);
+        return NULL;
+    }
+    fclose(f);
+    text[n] = '\0';
+    Json* json = jsonParse(parser, text);
+    free(text);
+    return json;
 }
 
 void jsonPrint(Json* json) {
@@ -373,4 +408,37 @@ void jsonPrint(Json* json) {
         default:
             break;
     }
+}
+
+Json* jsonSelect(Json* root, const char* path) {
+    if (!root || !path) {
+        return root;
+    }
+    if (path[0] != '/') {
+        return NULL;
+    }
+    Json* selected = root;
+    while (*path) {
+        path++;
+        const char* end = strchr(path, '/');
+        if (!end) {
+            end = path + strlen(path);
+        }
+        if (end - path == 0) {
+            break;
+        } else if (selected->type != JSON_OBJECT) {
+            return NULL;
+        }
+        uint32_t hash = jsonHash(path, end - path);
+        Json* value = selected->table->buckets[hash % JSON_TABLE_SIZE];
+        while (value && strncmp(value->key, path, end - path) != 0) {
+            value = value->next;
+        }
+        if (!value) {
+            return NULL;
+        }
+        selected = value;
+        path = end;
+    }
+    return selected;
 }
