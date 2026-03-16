@@ -183,6 +183,9 @@ static bool jsonNextToken(JsonParser* parser) {
 static const char* jsonStringDuplicate(JsonParser* parser) {
     size_t n = parser->end - parser->begin - 2; // ignore the quotes
     char* s = jsonAlloc(parser->arena, n + 1);
+    if (!s) {
+        return NULL;
+    }
     memcpy(s, parser->begin + 1, n);
     s[n] = '\0';
     return s;
@@ -235,9 +238,6 @@ static JsonTable* jsonParseObject(JsonParser* parser) {
         return NULL;
     }
     memset(table->buckets, 0, sizeof(table->buckets));
-    if (!table) {
-        return NULL;
-    }
     do {
         if (parser->token != JSON_TOKEN_STRING) {
             return NULL;
@@ -280,14 +280,16 @@ static Json* jsonParseNode(JsonParser* parser) {
             node = jsonNewNode(parser, JSON_NUMBER);
             char* end;
             node->number = strtod(parser->begin, &end);
-            if (!end) {
+            if (end != parser->end) {
                 return NULL;
             }
             return node;
         }
         case JSON_TOKEN_STRING:
             node = jsonNewNode(parser, JSON_STRING);
-            node->string = jsonStringDuplicate(parser);
+            if (!(node->string = jsonStringDuplicate(parser))) {
+                return NULL;
+            }
             return node;
         case JSON_TOKEN_LEFT_BRACKET:
             node = jsonNewNode(parser, JSON_ARRAY);
@@ -321,7 +323,11 @@ Json* jsonParse(JsonParser* parser, const char* text) {
     if (!jsonNextToken(parser)) {
         return NULL;
     }
-    return jsonParseNode(parser);
+    Json* root = jsonParseNode(parser);
+    if (!jsonNextToken(parser) || parser->token != JSON_TOKEN_EOF) {
+        return NULL;
+    }
+    return root;
 }
 
 Json* jsonParseFile(JsonParser* parser, const char* filename) {
@@ -330,15 +336,18 @@ Json* jsonParseFile(JsonParser* parser, const char* filename) {
         return NULL;
     }
     if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
         return NULL;
     }
     long n = ftell(f);
     if (n < 0) {
+        fclose(f);
         return NULL;
     }
     rewind(f);
     char* text = malloc(n + 1);
     if (!text) {
+        fclose(f);
         return NULL;
     }
     if (fread(text, sizeof(*text), n, f) != (size_t)n) {
